@@ -62,6 +62,7 @@ import (
 	swarm "gx/ipfs/QmSx9mhEnKWDkgBYaEY6MZFFajUtiQJ8bipSZhzPuALSPv/go-libp2p-swarm"
 	b58 "gx/ipfs/QmT8rehPR3F6bmwL6zjUN8XpiDBFFpMP2myPdC6ApsWfJf/go-base58"
 	cid "gx/ipfs/QmTprEaAA2A9bst5XH7exuyi5KzNMK3SEDNN8rBDnKWcUS/go-cid"
+	circuit "gx/ipfs/QmVEPsD9h95ToAC7NJpYopFcXyjVJm35xV4tw43J5JdCnL/go-libp2p-circuit"
 	ds "gx/ipfs/QmVSase1JP7cq9QkPT46oNwdp9pT6kBkG3oqS14y3QcZjG/go-datastore"
 	metrics "gx/ipfs/QmVjRAPfRtResCMCE4eBqr4Beoa6A89P1YweG9wUS6RqUL/go-libp2p-metrics"
 	ma "gx/ipfs/QmXY77cVe7rVRQXZZQRioukUM7aRW3BTcAgJe12MCtb3Ji/go-multiaddr"
@@ -213,7 +214,12 @@ func (n *IpfsNode) startOnlineServices(ctx context.Context, routingOption Routin
 	}
 
 	peerhost, err := hostOption(ctx, n.Identity, n.Peerstore, n.Reporter,
-		addrfilter, tpt, protec, &ConstructPeerHostOpts{DisableNatPortMap: cfg.Swarm.DisableNatPortMap})
+		addrfilter, tpt, protec, &ConstructPeerHostOpts{
+			DisableNatPortMap: cfg.Swarm.DisableNatPortMap,
+			DisableRelay:      cfg.Swarm.DisableRelay,
+			EnableRelayHop:    cfg.Swarm.EnableRelayHop,
+		})
+
 	if err != nil {
 		return err
 	}
@@ -705,6 +711,8 @@ func listenAddresses(cfg *config.Config) ([]ma.Multiaddr, error) {
 
 type ConstructPeerHostOpts struct {
 	DisableNatPortMap bool
+	DisableRelay      bool
+	EnableRelayHop    bool
 }
 
 type HostOption func(ctx context.Context, id peer.ID, ps pstore.Peerstore, bwr metrics.Reporter, fs []*net.IPNet, tpt smux.Transport, protc ipnet.Protector, opts *ConstructPeerHostOpts) (p2phost.Host, error)
@@ -731,7 +739,34 @@ func constructPeerHost(ctx context.Context, id peer.ID, ps pstore.Peerstore, bwr
 		hostOpts = append(hostOpts, p2pbhost.NATPortMap)
 	}
 
+	if !opts.DisableRelay {
+		filterRelayAddr := func(addrs []ma.Multiaddr) []ma.Multiaddr {
+			var raddrs []ma.Multiaddr
+			for _, addr := range addrs {
+				_, err := addr.ValueForProtocol(circuit.P_CIRCUIT)
+				if err == nil {
+					continue
+				}
+				raddrs = append(raddrs, addr)
+			}
+			return raddrs
+		}
+		hostOpts = append(hostOpts, p2pbhost.AddrsFactory(filterRelayAddr))
+	}
+
 	host := p2pbhost.New(network, hostOpts...)
+
+	if !opts.DisableRelay {
+		var relayOpts []circuit.RelayOpt
+		if opts.EnableRelayHop {
+			relayOpts = append(relayOpts, circuit.OptHop)
+		}
+
+		err := circuit.AddRelayTransport(ctx, host, relayOpts...)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	return host, nil
 }
